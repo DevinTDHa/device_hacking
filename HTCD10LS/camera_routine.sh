@@ -9,7 +9,9 @@ sleep 2
 
 # Trigger camera button press
 input keyevent KEYCODE_CAMERA
-sleep 5
+# Should return after the photo was taken.
+# Sleep after camera is done just to be sure.
+sleep 2
 
 # Lock the screen
 input keyevent KEYCODE_POWER
