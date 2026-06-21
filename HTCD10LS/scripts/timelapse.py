@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 import argparse
+import logging
 import os
 import subprocess
 import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("timelapse")
 
 
 def main():
@@ -14,6 +22,7 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    log.info("Sending command to phone.")
     result = subprocess.run(
         ["ssh", args.ssh_host, args.remote_cmd],
         capture_output=True,
@@ -23,9 +32,10 @@ def main():
 
     lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
     if not lines:
-        sys.exit("error: no output from remote command")
+        log.error("no output from remote command")
+        sys.exit(1)
     image_path = lines[-1]
-    print(f"captured: {image_path}")
+    log.info("captured: %s", image_path)
 
     subprocess.run(
         ["scp", f"{args.ssh_host}:{image_path}", f"{args.output_dir}/"],
@@ -33,7 +43,7 @@ def main():
     )
 
     local_path = os.path.join(args.output_dir, os.path.basename(image_path))
-    print(f"downloaded to: {local_path}")
+    log.info("downloaded to: %s", local_path)
 
 
 if __name__ == "__main__":
