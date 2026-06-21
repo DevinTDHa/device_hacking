@@ -19,7 +19,7 @@ total=$(ls $PHOTOS_FOLDER | wc -l)
 [ $total -gt $MAX_IMAGES ] && ls $PHOTOS_FOLDER | head -n $((total - MAX_IMAGES)) | while read -r f; do rm "$PHOTOS_FOLDER/$f"; done
 
 # echo the latest image
-echo $(ls $PHOTOS_FOLDER | tail -n 1)
+echo $PHOTOS_FOLDER/$(ls $PHOTOS_FOLDER | tail -n 1)
 
 # Sleep after camera is done just to be sure.
 sleep 2
