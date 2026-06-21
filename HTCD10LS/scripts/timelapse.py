@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,12 +38,14 @@ def main():
     image_path = lines[-1]
     log.info("captured: %s", image_path)
 
+    ext = os.path.splitext(os.path.basename(image_path))[1]
+    local_path = os.path.join(args.output_dir, f"{int(time.time())}{ext}")
+
     subprocess.run(
-        ["scp", f"{args.ssh_host}:{image_path}", f"{args.output_dir}/"],
+        ["scp", f"{args.ssh_host}:{image_path}", local_path],
         check=True,
     )
 
-    local_path = os.path.join(args.output_dir, os.path.basename(image_path))
     log.info("downloaded to: %s", local_path)
 
 
