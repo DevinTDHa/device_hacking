@@ -114,6 +114,68 @@ Flashing vbmeta did **not** wipe `/data` on this device, despite the theoretical
 >   Doing this from TWRP also neutralises `install-recovery.sh`, which is what makes
 >   TWRP finally persist across reboots.
 
+## Remote capture
+
+`capture` drives the stock MIUI camera over SSH and prints the absolute path of
+the resulting JPEG on stdout. Diagnostics go to stderr, so the path can be used
+directly:
+
+```sh
+ssh iot-redmi capture
+# /storage/emulated/0/DCIM/Camera/IMG_20260901_204229.jpg
+
+scp iot-redmi:"$(ssh iot-redmi capture)" .        # shoot and pull
+ssh iot-redmi 'capture -v'                        # with progress on stderr
+```
+
+Install (verified working 2026-09-01, from screen-off and locked):
+
+```sh
+scp capture iot-redmi:/data/data/com.termux/files/usr/bin/capture
+ssh iot-redmi 'chmod 755 /data/data/com.termux/files/usr/bin/capture'
+```
+
+One-time device setup — Termux ships with the storage permissions declared but
+**not granted**, so the SSH user gets `Permission denied` on the returned path
+even though the capture itself succeeded:
+
+```sh
+ssh iot-redmi 'su -c "pm grant com.termux android.permission.READ_EXTERNAL_STORAGE"'
+ssh iot-redmi 'su -c "pm grant com.termux android.permission.WRITE_EXTERNAL_STORAGE"'
+```
+
+### Four things that make this fail
+
+1. **SSH lands as an untrusted app, not root.** `ssh iot-redmi id` gives
+   `u0_a183 … context=u:r:untrusted_app:s0`. `input`, `am`, `wm` and `dumpsys`
+   all need uid 0, so the script re-execs itself through `su`. Magisk grants
+   this non-interactively — no prompt on the device.
+
+2. **The keyguard steals the shutter.** After waking, the camera can already be
+   `ResumedActivity` while `mCurrentFocus` is still `StatusBar`. `input keyevent
+   27` then goes to the lockscreen and does nothing at all — no photo, no error.
+   `wm dismiss-keyguard` is what actually hands focus over. The script waits for
+   `mCurrentFocus` to name `com.android.camera` rather than sleeping a fixed
+   time. (This device has no PIN/pattern; a secure lock would block this.)
+
+3. **The JPEG is written in two stages, and the first one looks complete.** A
+   ~130 KB EXIF/thumbnail header lands first, then the full ~2.5 MB image
+   arrives in one jump ~100 ms later. The embedded EXIF thumbnail carries its
+   own `ff d9` end-of-image marker, so the obvious "size stopped changing and it
+   ends in EOI" test reports success at a twentieth of the real size — and you
+   get a truncated file with no warning. The script requires the size to hold
+   for a full second, the EOI marker, *and* no open fd in `/proc/*/fd`.
+
+4. **New files must be found by name, not mtime.** `sdcardfs` timestamps are
+   coarse; a shot taken in the same second as a marker file does not register as
+   `-newer`. The script diffs the directory listing instead.
+
+Shots are detected by diffing `/storage/emulated/0/DCIM/Camera`, so anything the
+camera drops there is picked up, and the newest is returned when an HDR or burst
+shot produces several. The script holds `/sys/power/wake_lock` for the duration
+(the device can otherwise suspend between the shutter and the write) and by
+default returns the screen to however it found it.
+
 ## Power Management
 
 > [!ai] Gemini on ACC
