@@ -1,202 +1,27 @@
 #!/system/bin/sh
-#
-# capture -- take a photo with the stock MIUI camera app, print its absolute path.
-#
-# stdout is exactly one line: the absolute path of the new JPEG.
-# Everything else goes to stderr. Exits non-zero if no photo was produced.
-#
-#   ssh iot-redmi capture            -> /storage/emulated/0/DCIM/Camera/IMG_....jpg
-#   scp iot-redmi:"$(ssh iot-redmi capture)" .
-#
-# Needs root (Magisk). Re-execs itself through su when not already root.
+# Take a photo with the stock camera and print its absolute path.
+# Run as root:  su -c capture
 
-set -u
+DIR=/storage/emulated/0/DCIM/Camera
 
-DCIM=${CAPTURE_DIR:-/storage/emulated/0/DCIM/Camera}
-CAM_ACTION=android.media.action.STILL_IMAGE_CAMERA
-CAM_MATCH=com.android.camera
-KEY_WAKEUP=224
-KEY_CAMERA=27
-KEY_HOME=3
-WAKELOCK=capture_sh
-TOYBOX=/system/bin/toybox
+input keyevent 224                          # wake
+wm dismiss-keyguard                         # else the shutter goes to the lockscreen
 
-READY_TIMEOUT=20        # seconds to wait for the camera window to take input focus
-SHOT_TIMEOUT=20         # seconds to wait for the JPEG to appear after the shutter
-VERBOSE=0
-RESTORE=1               # put screen/keyguard back how we found them
+am start -a android.media.action.STILL_IMAGE_CAMERA >/dev/null
+until dumpsys window | grep -q 'mCurrentFocus.*com.android.camera'; do sleep 0.2; done
+sleep 1                                     # let the preview expose
 
-usage() {
-    cat >&2 <<EOF
-usage: capture [-v] [-k] [-t SECONDS] [-d DIR]
+last=$(ls "$DIR"/IMG_* | tail -1)
+input keyevent 27                           # shutter
+until [ "$(ls "$DIR"/IMG_* | tail -1)" != "$last" ]; do sleep 0.2; done
+new=$(ls "$DIR"/IMG_* | tail -1)
 
-  -v          verbose progress on stderr
-  -k          keep the screen on and stay in the camera afterwards
-  -t SECONDS  timeout for each wait phase (default $READY_TIMEOUT)
-  -d DIR      directory the camera saves into (default $DCIM)
-EOF
-}
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -v) VERBOSE=1 ;;
-        -k) RESTORE=0 ;;
-        -t) shift; READY_TIMEOUT=${1:-20}; SHOT_TIMEOUT=$READY_TIMEOUT ;;
-        -d) shift; DCIM=${1:?-d needs a directory} ;;
-        -h|--help) usage; exit 0 ;;
-        *) printf 'capture: unknown option %s\n' "$1" >&2; usage; exit 2 ;;
-    esac
-    shift
+# The full image lands just after a ~130KB EXIF/thumbnail stub; let the size settle.
+size=0
+until [ "$(stat -c %s "$new")" = "$size" ]; do
+    size=$(stat -c %s "$new")
+    sleep 1
 done
 
-log() { [ "$VERBOSE" = 1 ] && printf 'capture: %s\n' "$*" >&2; return 0; }
-die() { printf 'capture: %s\n' "$*" >&2; exit 1; }
-
-# --- become root -------------------------------------------------------------
-# ssh lands as the Termux user; the camera/input/dumpsys calls all need uid 0.
-if [ "$(id -u)" != "0" ]; then
-    SELF=$0
-    case "$SELF" in
-        /*) ;;
-        *)  SELF=$(command -v "$SELF" 2>/dev/null) || die "cannot resolve own path from \$0=$0" ;;
-    esac
-    ARGS=""
-    [ "$VERBOSE" = 1 ] && ARGS="$ARGS -v"
-    [ "$RESTORE" = 0 ] && ARGS="$ARGS -k"
-    ARGS="$ARGS -t $READY_TIMEOUT -d '$DCIM'"
-    exec su -c "'$SELF'$ARGS"
-fi
-
-[ -d "$DCIM" ] || die "no such directory: $DCIM"
-
-# --- state we may need to undo ----------------------------------------------
-was_asleep=0
-dumpsys power 2>/dev/null | grep -q 'mWakefulness=Asleep' && was_asleep=1
-
-cleanup() {
-    if [ "$RESTORE" = 1 ]; then
-        input keyevent $KEY_HOME 2>/dev/null
-        [ "$was_asleep" = 1 ] && input keyevent 26 2>/dev/null   # POWER -> screen off
-    fi
-    echo "$WAKELOCK" > /sys/power/wake_unlock 2>/dev/null
-}
-trap cleanup EXIT INT TERM
-
-# Hold the CPU awake for the whole sequence. Without this the device can suspend
-# between the shutter and the JPEG hitting the disk.
-echo "$WAKELOCK" > /sys/power/wake_lock 2>/dev/null
-
-# --- wake the screen and get past the lockscreen -----------------------------
-# The camera can be the resumed activity while the keyguard still owns input
-# focus, in which case the shutter keyevent goes to the lockscreen and silently
-# does nothing. dismiss-keyguard is what actually hands focus to the app.
-log "waking"
-[ "$was_asleep" = 1 ] && input keyevent $KEY_WAKEUP
-wm dismiss-keyguard 2>/dev/null
-
-# --- launch the camera and wait for it to own input focus --------------------
-log "launching camera"
-am start -a "$CAM_ACTION" >/dev/null 2>&1 || die "could not start camera"
-
-ready=0
-i=0
-steps=$((READY_TIMEOUT * 4))
-while [ $i -lt $steps ]; do
-    if dumpsys window 2>/dev/null | grep 'mCurrentFocus' | grep -q "$CAM_MATCH"; then
-        ready=1
-        break
-    fi
-    i=$((i + 1))
-    sleep 0.25
-done
-[ "$ready" = 1 ] || die "camera never took input focus after ${READY_TIMEOUT}s (locked with a PIN?)"
-log "camera focused after $((i / 4))s"
-
-# Give the preview a moment to settle so the first frame isn't black/unfocused.
-sleep 1
-
-# --- snapshot, shoot, diff ---------------------------------------------------
-# Comparing filenames is more reliable than mtime here: sdcardfs timestamps are
-# coarse, so a shot taken in the same second as a marker file wouldn't count as
-# newer.
-before="|"
-for f in "$DCIM"/*; do
-    [ -e "$f" ] || continue
-    before="$before${f##*/}|"
-done
-
-log "shutter"
-input keyevent $KEY_CAMERA
-
-new=""
-i=0
-steps=$((SHOT_TIMEOUT * 4))
-while [ $i -lt $steps ]; do
-    for f in "$DCIM"/*; do
-        [ -f "$f" ] || continue
-        case "$before" in
-            *"|${f##*/}|"*) ;;
-            *) new="$new$f
-" ;;
-        esac
-    done
-    [ -n "$new" ] && break
-    i=$((i + 1))
-    sleep 0.25
-done
-[ -n "$new" ] || die "no new file in $DCIM after ${SHOT_TIMEOUT}s"
-
-# A burst or HDR shot can drop more than one file; take the most recent.
-newest=$(printf '%s' "$new" | while IFS= read -r f; do
-    [ -n "$f" ] && stat -c '%Y %n' "$f" 2>/dev/null
-done | sort -n | tail -1 | cut -d' ' -f2-)
-[ -n "$newest" ] || die "could not stat the new file"
-
-# --- wait for the write to finish -------------------------------------------
-# The camera writes in two stages: a ~130 KB EXIF/thumbnail header appears
-# first, then the full image lands in one jump a fraction of a second later.
-# That first plateau is a trap. The embedded EXIF thumbnail carries its own
-# ff d9, so the obvious "size held steady and it ends with EOI" test declares
-# the file done at a twentieth of its real size. Three gates instead: the size
-# has to hold for a full second, the file has to end in EOI, and no process may
-# still have it open.
-is_jpeg=0
-case "$newest" in *.jpg|*.jpeg|*.JPG|*.JPEG) is_jpeg=1 ;; esac
-
-fd_open()  { ls -l /proc/*/fd/* 2>/dev/null | grep -qF "/$1"; }
-eoi_of()   { $TOYBOX tail -c 2 "$1" 2>/dev/null | $TOYBOX od -An -tx1 | tr -d ' \n'; }
-
-STABLE_NEEDED=5         # consecutive 0.2s samples at an unchanged size
-base=${newest##*/}
-prev=-1
-stable=0
-complete=0
-i=0
-steps=$((SHOT_TIMEOUT * 5))
-while [ $i -lt $steps ]; do
-    size=$(stat -c '%s' "$newest" 2>/dev/null || echo 0)
-    if [ "$size" -gt 0 ] && [ "$size" = "$prev" ]; then
-        stable=$((stable + 1))
-    else
-        stable=0
-    fi
-    prev=$size
-
-    if [ "$stable" -ge "$STABLE_NEEDED" ] && ! fd_open "$base"; then
-        if [ "$is_jpeg" = 0 ] || [ "$(eoi_of "$newest")" = "ffd9" ]; then
-            complete=1
-            break
-        fi
-    fi
-    i=$((i + 1))
-    sleep 0.2
-done
-
-if [ "$complete" = 1 ]; then
-    log "complete at ${prev} bytes"
-else
-    printf 'capture: warning: %s still looks unfinished after %ss (%s bytes)\n' \
-        "$newest" "$SHOT_TIMEOUT" "$prev" >&2
-fi
-
-printf '%s\n' "$newest"
+echo "$new"
+input keyevent 26                           # screen off

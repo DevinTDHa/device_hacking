@@ -116,17 +116,20 @@ Flashing vbmeta did **not** wipe `/data` on this device, despite the theoretical
 
 ## Remote capture
 
-`capture` drives the stock MIUI camera over SSH and prints the absolute path of
-the resulting JPEG on stdout. Diagnostics go to stderr, so the path can be used
-directly:
+`capture` drives the stock MIUI camera and prints the absolute path of the
+resulting JPEG on stdout — one line, nothing else. It **must be run as root**
+(see gotcha 1), and `su` does not have Termux's `bin` on its `PATH`, so it needs
+the full path:
 
 ```sh
-ssh iot-redmi capture
-# /storage/emulated/0/DCIM/Camera/IMG_20260901_204229.jpg
+ssh iot-redmi 'su -c $PREFIX/bin/capture'
+# /storage/emulated/0/DCIM/Camera/IMG_20260901_210104.jpg
 
-scp iot-redmi:"$(ssh iot-redmi capture)" .        # shoot and pull
-ssh iot-redmi 'capture -v'                        # with progress on stderr
+scp iot-redmi:"$(ssh iot-redmi 'su -c $PREFIX/bin/capture')" .   # shoot and pull
 ```
+
+`$PREFIX` is expanded by the Termux login shell before `su` runs, so the single
+quotes are what makes that work.
 
 Install (verified working 2026-09-01, from screen-off and locked):
 
@@ -144,37 +147,34 @@ ssh iot-redmi 'su -c "pm grant com.termux android.permission.READ_EXTERNAL_STORA
 ssh iot-redmi 'su -c "pm grant com.termux android.permission.WRITE_EXTERNAL_STORAGE"'
 ```
 
-### Four things that make this fail
+### Three things that make this fail
 
 1. **SSH lands as an untrusted app, not root.** `ssh iot-redmi id` gives
-   `u0_a183 … context=u:r:untrusted_app:s0`. `input`, `am`, `wm` and `dumpsys`
-   all need uid 0, so the script re-execs itself through `su`. Magisk grants
-   this non-interactively — no prompt on the device.
+   `u0_a183 … context=u:r:untrusted_app:s0`, and from there `dumpsys window`
+   returns *nothing at all* rather than an error. `input`, `am` and `wm` are the
+   same. Hence `su -c`. Magisk grants it non-interactively — no prompt on the
+   device.
 
 2. **The keyguard steals the shutter.** After waking, the camera can already be
    `ResumedActivity` while `mCurrentFocus` is still `StatusBar`. `input keyevent
    27` then goes to the lockscreen and does nothing at all — no photo, no error.
-   `wm dismiss-keyguard` is what actually hands focus over. The script waits for
-   `mCurrentFocus` to name `com.android.camera` rather than sleeping a fixed
+   `wm dismiss-keyguard` is what actually hands focus over. The script then waits
+   for `mCurrentFocus` to name `com.android.camera` rather than sleeping a fixed
    time. (This device has no PIN/pattern; a secure lock would block this.)
 
 3. **The JPEG is written in two stages, and the first one looks complete.** A
    ~130 KB EXIF/thumbnail header lands first, then the full ~2.5 MB image
-   arrives in one jump ~100 ms later. The embedded EXIF thumbnail carries its
-   own `ff d9` end-of-image marker, so the obvious "size stopped changing and it
-   ends in EOI" test reports success at a twentieth of the real size — and you
-   get a truncated file with no warning. The script requires the size to hold
-   for a full second, the EOI marker, *and* no open fd in `/proc/*/fd`.
+   arrives in one jump ~100 ms later. Returning as soon as the file appears
+   hands back a truncated image. Worse, the embedded EXIF thumbnail carries its
+   own `ff d9` end-of-image marker, so even "the size is steady *and* it ends in
+   EOI" reports success at a twentieth of the real size. What actually works is
+   just waiting for the size to stop changing, sampled a second apart — the stub
+   plateau is far too short to survive that.
 
-4. **New files must be found by name, not mtime.** `sdcardfs` timestamps are
-   coarse; a shot taken in the same second as a marker file does not register as
-   `-newer`. The script diffs the directory listing instead.
-
-Shots are detected by diffing `/storage/emulated/0/DCIM/Camera`, so anything the
-camera drops there is picked up, and the newest is returned when an HDR or burst
-shot produces several. The script holds `/sys/power/wake_lock` for the duration
-(the device can otherwise suspend between the shutter and the write) and by
-default returns the screen to however it found it.
+The newest shot is found with `ls "$DIR"/IMG_* | tail -1`: these filenames are
+`IMG_<date>_<time>.jpg`, so lexical order is chronological. The `IMG_*` glob is
+load-bearing — a `VID_*` file would sort last forever and hang the wait loop.
+The script blanks the screen when it is done.
 
 ## Power Management
 
