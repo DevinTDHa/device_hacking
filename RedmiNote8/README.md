@@ -176,6 +176,21 @@ The newest shot is found with `ls "$DIR"/IMG_* | tail -1`: these filenames are
 load-bearing — a `VID_*` file would sort last forever and hang the wait loop.
 The script blanks the screen when it is done.
 
+After each shot it prunes the camera roll to the newest `KEEP` (3000) images.
+Note that toybox `head` rejects a negative `-n`, so the count comes first:
+
+```sh
+n=$(ls "$DIR"/IMG_* | wc -l)
+if [ "$n" -gt "$KEEP" ]; then
+    ls "$DIR"/IMG_* | head -n $((n - KEEP)) | xargs rm -f
+fi
+```
+
+At 3000 files that is ~150 KB of arguments, comfortably inside `ARG_MAX`.
+Deleting the files leaves stale MediaStore rows behind, so the MIUI gallery can
+show broken thumbnails until the next media scan — irrelevant if nothing but
+`capture` reads the directory.
+
 ## Power Management
 
 > [!ai] Gemini on ACC
