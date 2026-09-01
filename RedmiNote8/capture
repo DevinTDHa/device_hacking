@@ -26,10 +26,7 @@ done
 
 echo "$new"
 
-# Drop all but the newest $KEEP. toybox head has no negative -n, so count first.
-n=$(ls "$DIR"/IMG_* | wc -l)
-if [ "$n" -gt "$KEEP" ]; then
-    ls "$DIR"/IMG_* | head -n $((n - KEEP)) | xargs rm -f
-fi
+# Drop all but the newest $KEEP: newest-first, skip that many, delete the rest.
+ls -r "$DIR"/IMG_* | tail -n +$((KEEP + 1)) | xargs rm -f
 
 input keyevent 26                           # screen off

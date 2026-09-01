@@ -176,20 +176,25 @@ The newest shot is found with `ls "$DIR"/IMG_* | tail -1`: these filenames are
 load-bearing — a `VID_*` file would sort last forever and hang the wait loop.
 The script blanks the screen when it is done.
 
-After each shot it prunes the camera roll to the newest `KEEP` (3000) images.
-Note that toybox `head` rejects a negative `-n`, so the count comes first:
+After each shot it prunes the camera roll to the newest `KEEP` (3000) images:
 
 ```sh
-n=$(ls "$DIR"/IMG_* | wc -l)
-if [ "$n" -gt "$KEEP" ]; then
-    ls "$DIR"/IMG_* | head -n $((n - KEEP)) | xargs rm -f
-fi
+ls -r "$DIR"/IMG_* | tail -n +$((KEEP + 1)) | xargs rm -f
 ```
 
-At 3000 files that is ~150 KB of arguments, comfortably inside `ARG_MAX`.
-Deleting the files leaves stale MediaStore rows behind, so the MIUI gallery can
-show broken thumbnails until the next media scan — irrelevant if nothing but
-`capture` reads the directory.
+The obvious spelling of this is `head -n -$KEEP` — print all but the last N —
+but **toybox `head` rejects a negative `-n`** (`head: -n < 0`). Reversing with
+`ls -r` and skipping the first `KEEP` lines with `tail -n +N` gets the same
+result and stays in toybox. Termux's busybox (v1.38) does support `head -n -N`,
+but it is a user-installed package rather than part of the OS, and leaning on it
+here would trade a working one-liner for a path dependency that fails silently
+if the package ever goes away.
+
+Under the threshold the pipeline is empty and `xargs rm -f` is a clean no-op —
+exit 0, nothing on stderr. At 3000 files the glob is ~150 KB of arguments,
+comfortably inside `ARG_MAX`. Deleting the files leaves stale MediaStore rows
+behind, so the MIUI gallery can show broken thumbnails until the next media
+scan — irrelevant if nothing but `capture` reads the directory.
 
 ## Power Management
 
